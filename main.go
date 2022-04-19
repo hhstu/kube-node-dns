@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"flag"
 	"fmt"
 	"github.com/google/martian/log"
+	"io"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -18,15 +21,30 @@ import (
 	"time"
 )
 
-const devKubeconfigPath = "kubeconfig"
+const (
+	devKubeconfigPath  = "kubeconfig"
+	configmapNamespace = "kube-system"
+	limitLine          = "####################### no write after this line, 本行之后为自动生成内容，请勿编辑\n"
+)
 
 var nodeDns map[string]string
 var mutex sync.Mutex
 
+var configmapName string
+var hostsFile string
+
 func init() {
+	flag.StringVar(&configmapName, "configmap_name", "", "configmap name for write")
+	flag.StringVar(&hostsFile, "hosts_file", "", "hosts_file to write, use if configmap_name is null")
+	flag.Parse()
 	nodeDns = make(map[string]string)
 }
 func main() {
+
+	if configmapName == "" && hostsFile == "" {
+		log.Errorf("configmap_name or hosts_file must have one")
+		os.Exit(1)
+	}
 
 	kubeconfig, err := clientcmd.BuildConfigFromFlags("", GetKubeConfigFile(""))
 	if err != nil {
@@ -67,7 +85,7 @@ func main() {
 	if ok := cache.WaitForCacheSync(stopCh, func() bool { return true }); !ok {
 		log.Errorf("failed to wait for caches to sync")
 	}
-	go syncToConfigmap(kubeclient, stopCh)
+	go loop(kubeclient, stopCh)
 	select {
 	case <-stopCh:
 		log.Infof("收到 kill 信号， 主动退出")
@@ -75,41 +93,80 @@ func main() {
 	}
 }
 
-func syncToConfigmap(kubeclient *kubernetes.Clientset, stop <-chan struct{}) {
-
+func loop(kubeclient *kubernetes.Clientset, stop <-chan struct{}) {
 	ticker := time.NewTicker(10 * time.Second)
 	select {
 	case <-ticker.C:
-
-		cm, err := kubeclient.CoreV1().ConfigMaps("kube-system").Get(context.Background(), "dns-node", v1.GetOptions{})
-		if err != nil {
-			// create
-			if k8serrors.IsNotFound(err) {
-				var configmap corev1.ConfigMap
-				configmap.Name = "dns-node"
-				configmap.Namespace = "kube-system"
-				buildConfigmap(&configmap)
-				if _, err := kubeclient.CoreV1().ConfigMaps("kube-system").Create(context.Background(), &configmap, v1.CreateOptions{}); err != nil {
-					log.Errorf("fail create configmap: %s", err)
-				}
-				return
-			}
-			log.Errorf("fail get configmap: %s", err)
-			return
+		if configmapName != "" {
+			syncToConfigmap(kubeclient)
 		}
-		// update
-		buildConfigmap(cm)
-		if _, err := kubeclient.CoreV1().ConfigMaps("kube-system").Update(context.Background(), cm, v1.UpdateOptions{}); err != nil {
-			log.Errorf("fail update configmap: %s", err)
-			return
+		if hostsFile != "" {
+			syncToHostFile()
 		}
-		log.Debugf("sync to configmap success")
 	case <-stop:
 		log.Infof("exit syncToConfigmap")
 		ticker.Stop()
+	}
+}
+
+func syncToHostFile() {
+
+	file, err := os.Open(hostsFile)
+	if err != nil {
+		log.Errorf("fail open file %s %s", hostsFile, err.Error())
 		return
 	}
+	defer file.Close()
+	var newFile string
+	br := bufio.NewReader(file)
+	for {
+		a, _, c := br.ReadLine()
+		if c == io.EOF {
+			break
+		}
+		line := string(a) + "\n"
+		if line == limitLine {
+			break
+		}
+		newFile += line
+	}
+	newFile += limitLine
 
+	for node, ip := range nodeDns {
+		newFile += fmt.Sprintf("%s %s \n", ip, node)
+	}
+
+	if err := os.WriteFile(hostsFile, []byte(newFile), 0644); err != nil {
+		log.Errorf("fail write file %s %s", hostsFile, err.Error())
+		return
+	}
+	log.Debugf("sync to configmap success")
+}
+
+func syncToConfigmap(kubeclient *kubernetes.Clientset) {
+	cm, err := kubeclient.CoreV1().ConfigMaps(configmapNamespace).Get(context.Background(), configmapName, v1.GetOptions{})
+	if err != nil {
+		// create
+		if k8serrors.IsNotFound(err) {
+			var configmap corev1.ConfigMap
+			configmap.Name = configmapName
+			configmap.Namespace = configmapNamespace
+			buildConfigmap(&configmap)
+			if _, err := kubeclient.CoreV1().ConfigMaps(configmapNamespace).Create(context.Background(), &configmap, v1.CreateOptions{}); err != nil {
+				log.Errorf("fail create configmap: %s", err)
+			}
+			return
+		}
+		log.Errorf("fail get configmap: %s", err)
+		return
+	}
+	// update
+	buildConfigmap(cm)
+	if _, err := kubeclient.CoreV1().ConfigMaps(configmapNamespace).Update(context.Background(), cm, v1.UpdateOptions{}); err != nil {
+		log.Errorf("fail update configmap: %s", err)
+		return
+	}
+	log.Debugf("sync to configmap success")
 }
 
 func buildConfigmap(cm *corev1.ConfigMap) {
