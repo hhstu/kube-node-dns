@@ -10,10 +10,17 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/uuid"
 	kubeinformers "k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
+	typedV1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/tools/leaderelection"
+	"k8s.io/client-go/tools/leaderelection/resourcelock"
+	"k8s.io/client-go/tools/record"
+	"k8s.io/klog/v2"
 	"k8s.io/sample-controller/pkg/signals"
 	"os"
 	"strings"
@@ -75,6 +82,7 @@ func main() {
 			if newDepl.GetAnnotations()["kilo.squat.ai/wireguard-ip"] != "" && newDepl.GetAnnotations()["kilo.squat.ai/wireguard-ip"] == newDepl.GetAnnotations()["kilo.squat.ai/wireguard-ip"] {
 				return
 			}
+			log.Infof("node %s update handler", newDepl.Name)
 			cacheToMap(newDepl)
 		},
 		// todo
@@ -85,7 +93,14 @@ func main() {
 	if ok := cache.WaitForCacheSync(stopCh, func() bool { return true }); !ok {
 		log.Errorf("failed to wait for caches to sync")
 	}
-	go loop(kubeclient, stopCh)
+
+	if hostsFile != "" {
+		go loopHosts(stopCh)
+	}
+	if configmapName != "" {
+		go loopConfigMap(kubeclient, stopCh)
+	}
+
 	select {
 	case <-stopCh:
 		log.Infof("收到 kill 信号， 主动退出")
@@ -93,20 +108,72 @@ func main() {
 	}
 }
 
-func loop(kubeclient *kubernetes.Clientset, stop <-chan struct{}) {
+func loopConfigMap(kubeclient *kubernetes.Clientset, stop <-chan struct{}) {
+	id, err := os.Hostname()
+	if err != nil {
+		return
+	}
+	id = id + "_" + string(uuid.NewUUID())
+	rl, err := resourcelock.New(resourcelock.ConfigMapsResourceLock,
+		"kube-system",
+		"kube-node-dns-lock",
+		kubeclient.CoreV1(),
+		kubeclient.CoordinationV1(),
+		resourcelock.ResourceLockConfig{
+			Identity:      id,
+			EventRecorder: createRecorder(kubeclient, "kube-node-dns"),
+		})
+	if err != nil {
+		klog.Fatalf("error creating lock: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	leaderelection.RunOrDie(ctx, leaderelection.LeaderElectionConfig{
+		Lock:          rl,
+		LeaseDuration: 10 * time.Second,
+		RenewDeadline: 5 * time.Second,
+		RetryPeriod:   2 * time.Second,
+		Callbacks: leaderelection.LeaderCallbacks{
+			OnStartedLeading: func(ctx context.Context) {
+				log.Infof("get lock, sync_to_configmap start")
+				ticker := time.NewTicker(10 * time.Second)
+				select {
+				case <-ticker.C:
+					syncToConfigmap(kubeclient)
+				case <-stop:
+					log.Infof("get stop, exit syncToConfigmap")
+					ticker.Stop()
+				case <-ctx.Done():
+					log.Infof("leaderelection lost,  exit syncToConfigmap")
+					ticker.Stop()
+				}
+			},
+			OnStoppedLeading: func() {
+				cancel()
+				log.Infof("leaderelection lost")
+			},
+		},
+		WatchDog: leaderelection.NewLeaderHealthzAdaptor(time.Second * 20),
+		Name:     "kube-node-dns",
+	})
+
+}
+
+func loopHosts(stop <-chan struct{}) {
 	ticker := time.NewTicker(10 * time.Second)
 	select {
 	case <-ticker.C:
-		if configmapName != "" {
-			syncToConfigmap(kubeclient)
-		}
-		if hostsFile != "" {
-			syncToHostFile()
-		}
+		syncToHostFile()
 	case <-stop:
 		log.Infof("exit syncToConfigmap")
 		ticker.Stop()
 	}
+}
+
+func createRecorder(kubeClient kubernetes.Interface, userAgent string) record.EventRecorder {
+	eventBroadcaster := record.NewBroadcaster()
+	eventBroadcaster.StartStructuredLogging(0)
+	eventBroadcaster.StartRecordingToSink(&typedV1.EventSinkImpl{Interface: kubeClient.CoreV1().Events("")})
+	return eventBroadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: userAgent})
 }
 
 func syncToHostFile() {
