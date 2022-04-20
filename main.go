@@ -72,9 +72,7 @@ func main() {
 				// Two different versions of the same Deployment will always have different RVs.
 				return
 			}
-			if newDepl.GetAnnotations()["kilo.squat.ai/wireguard-ip"] != "" && newDepl.GetAnnotations()["kilo.squat.ai/wireguard-ip"] == newDepl.GetAnnotations()["kilo.squat.ai/wireguard-ip"] {
-				return
-			}
+			log.Infof("node update %s %s", newDepl.Name, newDepl.GetAnnotations()["kilo.squat.ai/wireguard-ip"])
 			cacheToMap(newDepl)
 		},
 		// todo
@@ -95,17 +93,20 @@ func main() {
 
 func loop(kubeclient *kubernetes.Clientset, stop <-chan struct{}) {
 	ticker := time.NewTicker(10 * time.Second)
-	select {
-	case <-ticker.C:
-		if configmapName != "" {
-			syncToConfigmap(kubeclient)
+	for {
+		select {
+		case <-ticker.C:
+			if configmapName != "" {
+				syncToConfigmap(kubeclient)
+			}
+			if hostsFile != "" {
+				syncToHostFile()
+			}
+		case <-stop:
+			log.Infof("exit syncToConfigmap")
+			ticker.Stop()
+			return
 		}
-		if hostsFile != "" {
-			syncToHostFile()
-		}
-	case <-stop:
-		log.Infof("exit syncToConfigmap")
-		ticker.Stop()
 	}
 }
 
@@ -140,7 +141,7 @@ func syncToHostFile() {
 		log.Errorf("fail write file %s %s", hostsFile, err.Error())
 		return
 	}
-	log.Debugf("sync to configmap success")
+	log.Debugf("sync to host success")
 }
 
 func syncToConfigmap(kubeclient *kubernetes.Clientset) {

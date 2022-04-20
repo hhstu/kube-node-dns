@@ -1,22 +1,22 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: kube-node-dns
+  name: kube-node-dns-cm
   namespace: kube-system
   labels:
-    k8s-app: kube-node-dns
+    k8s-app: kube-node-dns-cm
 spec:
   selector:
     matchLabels:
-      k8s-app: kube-node-dns
+      k8s-app: kube-node-dns-cm
   template:
     metadata:
       labels:
-        k8s-app: kube-node-dns
+        k8s-app: kube-node-dns-cm
     spec:
       serviceAccountName: kube-node-dns
       containers:
-        - name: kube-node-dns
+        - name: kube-node-dns-cm
           image: basefly/kube-node-dns
           imagePullPolicy: IfNotPresent
           env:
@@ -44,36 +44,3 @@ spec:
             type: File
           name: localtime
 ---
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: kube-node-dns
-  namespace: kube-system
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: kube-node-dns
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: kube-node-dns
-subjects:
-  - kind: ServiceAccount
-    name: kube-node-dns
-    namespace: kube-system
-
----
-
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: kube-node-dns
-  namespace: kube-system
-rules:
-  - apiGroups: ["core"]
-    resources: ["configmaps"]
-    verbs: ["*"]
-  - apiGroups: [ "" ]
-    resources: [ "nodes" ]
-    verbs: [ "list","watch"]

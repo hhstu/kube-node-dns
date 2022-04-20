@@ -1,0 +1,97 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kube-node-dns-cm
+  namespace: kube-system
+  labels:
+    k8s-app: kube-node-dns-cm
+spec:
+  selector:
+    matchLabels:
+      k8s-app: kube-node-dns-cm
+  template:
+    metadata:
+      labels:
+        k8s-app: kube-node-dns-cm
+    spec:
+      serviceAccountName: kube-node-dns
+      containers:
+        - name: kube-node-dns-cm
+          image: basefly/kube-node-dns
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          command:
+            - ./kube-node-dns
+          args:
+            - --configmap_name=dns-node
+          resources:
+            limits:
+              memory: 500Mi
+              cpu: 200m
+            requests:
+              cpu: 10m
+              memory: 20Mi
+          volumeMounts:
+            - mountPath: /etc/localtime
+              name: localtime
+      volumes:
+        - hostPath:
+            path: /etc/localtime
+            type: File
+          name: localtime
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: kube-node-dns-agent
+  namespace: kube-system
+  labels:
+    k8s-app: kube-node-dns-agent
+spec:
+  selector:
+    matchLabels:
+      k8s-app: kube-node-dns-agent
+  template:
+    metadata:
+      labels:
+        k8s-app: kube-node-dns-agent
+    spec:
+      serviceAccountName: kube-node-dns
+      containers:
+        - name: kube-node-dns-agent
+          image: basefly/kube-node-dns
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          command:
+            - ./kube-node-dns
+          args:
+            - --hosts_file=/etc/node_hosts
+          resources:
+            limits:
+              memory: 500Mi
+              cpu: 200m
+            requests:
+              cpu: 10m
+              memory: 20Mi
+          volumeMounts:
+            - mountPath: /etc/node_hosts
+              name:  hosts
+            - mountPath: /etc/localtime
+              name: localtime
+      volumes:
+        - hostPath:
+            path: /etc/localtime
+            type: File
+          name: localtime
+        - hostPath:
+            path: /etc/hosts
+            type: File
+          name: hosts
