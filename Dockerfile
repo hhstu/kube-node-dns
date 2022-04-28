@@ -3,7 +3,7 @@ WORKDIR /build
 ARG TARGETARCH
 ENV GOPROXY=https://goproxy.io,direct
 COPY . .
-RUN GOOS=linux   GOARCH=${TARGETARCH} go build -o kube-node-dns main.go
+RUN GOOS=linux  CGO_ENABLED=0 GOARCH=${TARGETARCH} go build -o kube-node-dns main.go
 
 FROM alpine
 
