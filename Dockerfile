@@ -1,4 +1,4 @@
-FROM --platform=linux/amd64 golang:1.18 AS builder
+FROM --platform=linux/amd64 golang:1.18.1 AS builder
 WORKDIR /build
 ARG TARGETARCH
 ENV GOPROXY=https://goproxy.io,direct
